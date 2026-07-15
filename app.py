@@ -68,15 +68,16 @@ def get_product_name_series(df: pd.DataFrame) -> pd.Series:
     if not fallback_columns:
         return pd.Series([], dtype=str)
 
-    cleaned = df[fallback_columns].fillna("").astype(str).applymap(str.strip)
-
-    def first_non_empty(values: pd.Series) -> str:
-        for value in values:
-            if value:
-                return value
+    def first_non_empty(row: pd.Series) -> str:
+        for column in fallback_columns:
+            value = row.get(column) if isinstance(row, pd.Series) else row[column]
+            if pd.notna(value):
+                candidate = str(value).strip()
+                if candidate:
+                    return candidate
         return ""
 
-    return cleaned.apply(first_non_empty, axis=1)
+    return df.apply(first_non_empty, axis=1).astype(str)
 
 
 @st.cache_data(show_spinner=False)
