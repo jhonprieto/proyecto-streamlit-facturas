@@ -43,7 +43,20 @@ def validate_excel_file() -> None:
         st.error(f"La hoja '{SHEET_NAME}' no existe en {EXCEL_PATH.name}.")
         st.stop()
 
+    ws = wb[SHEET_NAME]
+    headers = [cell.value for cell in ws[1]]
     wb.close()
+
+    if not any(col in headers for col in FALLBACK_PRODUCT_COLUMNS):
+        st.error(
+            "El archivo Excel no tiene ninguna de las columnas de nombre de producto esperadas. "
+            f"Debe incluir una de: {', '.join(FALLBACK_PRODUCT_COLUMNS)}."
+        )
+        st.stop()
+
+    if "Precio" not in headers:
+        st.error("El archivo Excel debe incluir la columna 'Precio' para generar facturas correctamente.")
+        st.stop()
 
 
 def normalize_product_name(value: str) -> str:
@@ -51,10 +64,19 @@ def normalize_product_name(value: str) -> str:
 
 
 def get_product_name_series(df: pd.DataFrame) -> pd.Series:
-    for column in FALLBACK_PRODUCT_COLUMNS:
-        if column in df.columns:
-            return df[column].fillna("").astype(str).str.strip()
-    return pd.Series([], dtype=str)
+    fallback_columns = [column for column in FALLBACK_PRODUCT_COLUMNS if column in df.columns]
+    if not fallback_columns:
+        return pd.Series([], dtype=str)
+
+    cleaned = df[fallback_columns].fillna("").astype(str).applymap(str.strip)
+
+    def first_non_empty(values: pd.Series) -> str:
+        for value in values:
+            if value:
+                return value
+        return ""
+
+    return cleaned.apply(first_non_empty, axis=1)
 
 
 @st.cache_data(show_spinner=False)
@@ -103,14 +125,21 @@ def get_next_id(df: pd.DataFrame) -> int:
 
 
 def append_product_to_excel(row_map: dict[str, object]) -> None:
-    wb = openpyxl.load_workbook(EXCEL_PATH)
-    ws = wb[SHEET_NAME]
-    headers = [cell.value for cell in ws[1]]
+    try:
+        wb = openpyxl.load_workbook(EXCEL_PATH)
+        ws = wb[SHEET_NAME]
+        headers = [cell.value for cell in ws[1]]
 
-    new_row = [row_map.get(str(header), "") for header in headers]
-    ws.append(new_row)
-    wb.save(EXCEL_PATH)
-    wb.close()
+        new_row = [row_map.get(str(header), "") for header in headers]
+        ws.append(new_row)
+        wb.save(EXCEL_PATH)
+    except Exception as exc:
+        raise RuntimeError(f"No se pudo guardar el producto en Excel: {exc}") from exc
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
 
 
 
@@ -192,7 +221,7 @@ def render_invoice_tab(products_df: pd.DataFrame) -> None:
         issue_date = st.date_input("Fecha", value=date.today())
 
     product_names = get_product_name_series(products_df)
-    options = sorted(product_names.dropna().unique().tolist())
+    options = sorted([name for name in product_names.dropna().unique().tolist() if name])
 
     if not options:
         st.warning("No se encontraron nombres de producto válidos en el Excel.")
@@ -331,7 +360,11 @@ def main() -> None:
     st.caption("Genera facturas desde tu Excel de productos y agrega nuevos productos al mismo archivo.")
 
     validate_excel_file()
-    products_df = load_products()
+    try:
+        products_df = load_products()
+    except RuntimeError as exc:
+        st.error(str(exc))
+        return
 
     tab1, tab2 = st.tabs(["Generar factura", "Gestion de productos"])
 
