@@ -11,17 +11,62 @@ import streamlit as st
 EXCEL_PATH = Path(__file__).parent / "Productos.xlsx"
 SHEET_NAME = "Productos"
 IGV_RATE = 0.18
+EXPECTED_PRODUCT_HEADERS = [
+    "ID",
+    "Nombre_Drive",
+    "Producto_Web",
+    "Color",
+    "Kardex",
+    "Nombre_Genesys",
+    "Gama",
+    "Precio",
+    "stock_Ideal",
+    "Precio_sinIGV",
+    "Karde_EQ",
+]
+FALLBACK_PRODUCT_COLUMNS = ["Producto_Web", "Nombre_Drive", "Nombre_Genesys", "Producto"]
 
 
 def validate_excel_file() -> None:
     if not EXCEL_PATH.exists():
-        st.error(f"No se encontro el archivo {EXCEL_PATH.name} en la carpeta del proyecto.")
+        st.error(f"No se encontró el archivo {EXCEL_PATH.name} en la carpeta del proyecto.")
         st.stop()
+
+    try:
+        wb = openpyxl.load_workbook(EXCEL_PATH, read_only=True, data_only=True)
+    except Exception as exc:
+        st.error(f"No se pudo abrir {EXCEL_PATH.name} como Excel: {exc}")
+        st.stop()
+
+    if SHEET_NAME not in wb.sheetnames:
+        wb.close()
+        st.error(f"La hoja '{SHEET_NAME}' no existe en {EXCEL_PATH.name}.")
+        st.stop()
+
+    wb.close()
+
+
+def normalize_product_name(value: str) -> str:
+    return str(value or "").strip()
+
+
+def get_product_name_series(df: pd.DataFrame) -> pd.Series:
+    for column in FALLBACK_PRODUCT_COLUMNS:
+        if column in df.columns:
+            return df[column].fillna("").astype(str).str.strip()
+    return pd.Series([], dtype=str)
 
 
 @st.cache_data(show_spinner=False)
 def load_products() -> pd.DataFrame:
-    df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME)
+    try:
+        df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME)
+    except FileNotFoundError:
+        raise RuntimeError(f"El archivo {EXCEL_PATH.name} no existe.")
+    except ValueError as exc:
+        raise RuntimeError(f"Error leyendo la hoja '{SHEET_NAME}' del Excel: {exc}")
+    except Exception as exc:
+        raise RuntimeError(f"No se pudo cargar el Excel: {exc}")
 
     for col in ["Precio", "Precio_sinIGV", "stock_Ideal"]:
         if col in df.columns:
@@ -30,11 +75,18 @@ def load_products() -> pd.DataFrame:
     if "Producto_Web" in df.columns:
         df["Producto_Web"] = df["Producto_Web"].astype(str).str.strip()
 
+    for col in ["Nombre_Drive", "Nombre_Genesys", "Producto"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+
     return df
 
 
 def get_headers() -> list[str]:
-    wb = openpyxl.load_workbook(EXCEL_PATH)
+    wb = openpyxl.load_workbook(EXCEL_PATH, read_only=True, data_only=True)
+    if SHEET_NAME not in wb.sheetnames:
+        wb.close()
+        raise ValueError(f"La hoja '{SHEET_NAME}' no existe en {EXCEL_PATH.name}.")
     ws = wb[SHEET_NAME]
     headers = [cell.value for cell in ws[1]]
     wb.close()
@@ -139,29 +191,39 @@ def render_invoice_tab(products_df: pd.DataFrame) -> None:
     with c3:
         issue_date = st.date_input("Fecha", value=date.today())
 
-    product_names = sorted(products_df["Producto_Web"].dropna().astype(str).unique().tolist())
+    product_names = get_product_name_series(products_df)
+    options = sorted(product_names.dropna().unique().tolist())
+
+    if not options:
+        st.warning("No se encontraron nombres de producto válidos en el Excel.")
+        return
 
     with st.form("add_item_form", clear_on_submit=True):
         f1, f2 = st.columns([3, 1])
         with f1:
-            selected_product = st.selectbox("Producto", options=product_names)
+            selected_product = st.selectbox("Producto", options=options)
         with f2:
             quantity = st.number_input("Cantidad", min_value=1, value=1, step=1)
 
         add_item = st.form_submit_button("Agregar a la factura", use_container_width=True)
 
     if add_item:
-        product_row = products_df.loc[products_df["Producto_Web"] == selected_product].iloc[0]
-        unit_price = float(product_row.get("Precio", 0) or 0)
+        normalized_name = selected_product.strip().lower()
+        matched_rows = products_df[product_names.str.lower() == normalized_name]
+        if matched_rows.empty:
+            st.error("No se encontró el producto seleccionado en los datos.")
+        else:
+            product_row = matched_rows.iloc[0]
+            unit_price = float(product_row.get("Precio", 0) or 0)
 
-        st.session_state.invoice_items.append(
-            {
-                "Producto": selected_product,
-                "Cantidad": int(quantity),
-                "Precio Unitario": unit_price,
-            }
-        )
-        st.success(f"Producto agregado: {selected_product}")
+            st.session_state.invoice_items.append(
+                {
+                    "Producto": selected_product,
+                    "Cantidad": int(quantity),
+                    "Precio Unitario": unit_price,
+                }
+            )
+            st.success(f"Producto agregado: {selected_product}")
 
     if st.button("Limpiar factura", type="secondary"):
         st.session_state.invoice_items = []
@@ -228,16 +290,15 @@ def render_product_tab(products_df: pd.DataFrame) -> None:
         submit = st.form_submit_button("Guardar producto", use_container_width=True)
 
     if submit:
-        name_normalized = product_name.strip()
+        name_normalized = normalize_product_name(product_name)
         if not name_normalized:
             st.error("Debes ingresar el nombre del producto.")
             return
 
-        if "Producto_Web" in products_df.columns:
-            duplicate = products_df["Producto_Web"].astype(str).str.strip().str.lower() == name_normalized.lower()
-            if duplicate.any():
-                st.error("Ese producto ya existe en el Excel.")
-                return
+        existing_names = get_product_name_series(products_df).str.lower()
+        if name_normalized.lower() in existing_names.values:
+            st.error("Ese producto ya existe en el Excel.")
+            return
 
         row_map = {
             "ID": next_id,
