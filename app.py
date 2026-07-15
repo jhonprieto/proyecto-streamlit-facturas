@@ -257,56 +257,67 @@ def render_invoice_tab(products_df: pd.DataFrame) -> None:
 
     if st.button("Limpiar factura", type="secondary"):
         st.session_state.invoice_items = []
+        st.session_state.edit_invoice_index = None
         st.rerun()
 
     if not st.session_state.invoice_items:
         st.info("Agrega productos para construir la factura.")
         return
 
+    if "edit_invoice_index" not in st.session_state:
+        st.session_state.edit_invoice_index = None
+
     with st.expander("Revisar y editar ítems de la factura", expanded=True):
         for idx, item in enumerate(st.session_state.invoice_items):
-            item_cols = st.columns([4, 1])
+            item_cols = st.columns([4, 1, 1])
             item_cols[0].markdown(
                 f"**{idx + 1}. {item['Producto']}** — Cantidad: {item['Cantidad']} — Precio unitario: S/ {float(item['Precio Unitario']):,.2f}"
             )
-            if item_cols[1].button("Eliminar", key=f"remove_{idx}"):
+            if item_cols[1].button("Actualizar", key=f"update_{idx}"):
+                st.session_state.edit_invoice_index = idx
+                st.rerun()
+            if item_cols[2].button("Eliminar", key=f"remove_{idx}"):
                 removed = st.session_state.invoice_items.pop(idx)
+                st.session_state.edit_invoice_index = None
                 st.success(f"Producto eliminado: {removed['Producto']}")
                 st.rerun()
 
-        if st.session_state.invoice_items:
-            with st.form("edit_invoice_item_form", clear_on_submit=False):
-                edit_options = [
-                    f"{i + 1}. {item['Producto']} (x{item['Cantidad']})"
-                    for i, item in enumerate(st.session_state.invoice_items)
-                ]
-                selected_option = st.selectbox("Item a editar", options=edit_options)
-                selected_index = edit_options.index(selected_option)
-                selected_item = st.session_state.invoice_items[selected_index]
+        if st.session_state.edit_invoice_index is not None:
+            edit_index = st.session_state.edit_invoice_index
+            if 0 <= edit_index < len(st.session_state.invoice_items):
+                selected_item = st.session_state.invoice_items[edit_index]
+                st.markdown(f"### Editar item {edit_index + 1}: {selected_item['Producto']}")
+                with st.form("edit_invoice_item_form", clear_on_submit=False):
+                    new_quantity = st.number_input(
+                        "Cantidad",
+                        min_value=1,
+                        value=int(selected_item["Cantidad"]),
+                        step=1,
+                        key=f"edit_quantity_{edit_index}",
+                    )
+                    new_price = st.number_input(
+                        "Precio unitario",
+                        min_value=0.0,
+                        value=float(selected_item["Precio Unitario"]),
+                        step=0.1,
+                        format="%.2f",
+                        key=f"edit_price_{edit_index}",
+                    )
 
-                new_quantity = st.number_input(
-                    "Cantidad",
-                    min_value=1,
-                    value=int(selected_item["Cantidad"]),
-                    step=1,
-                    key="edit_quantity",
-                )
-                new_price = st.number_input(
-                    "Precio unitario",
-                    min_value=0.0,
-                    value=float(selected_item["Precio Unitario"]),
-                    step=0.1,
-                    format="%.2f",
-                    key="edit_price",
-                )
+                    update_item = st.form_submit_button("Guardar cambios", use_container_width=True)
+                    cancelar = st.form_submit_button("Cancelar edición", type="secondary")
 
-                update_item = st.form_submit_button("Actualizar item", use_container_width=True)
-
-                if update_item:
-                    st.session_state.invoice_items[selected_index]["Cantidad"] = int(new_quantity)
-                    st.session_state.invoice_items[selected_index]["Precio Unitario"] = float(new_price)
-                    st.success("Item actualizado correctamente.")
-                    st.rerun()
+                    if update_item:
+                        st.session_state.invoice_items[edit_index]["Cantidad"] = int(new_quantity)
+                        st.session_state.invoice_items[edit_index]["Precio Unitario"] = float(new_price)
+                        st.session_state.edit_invoice_index = None
+                        st.success("Item actualizado correctamente.")
+                        st.rerun()
+                    if cancelar:
+                        st.session_state.edit_invoice_index = None
+                        st.rerun()
+            else:
+                st.session_state.edit_invoice_index = None
 
     invoice_df = make_invoice_dataframe(st.session_state.invoice_items)
     subtotal = float(invoice_df["Subtotal"].sum())
